@@ -1,76 +1,72 @@
-from numpy import NaN
+import numpy as np
 import pandas as pd
 from scipy.spatial.distance import pdist,squareform
 
 def loadMovies():
     movies = pd.read_csv("Data/movies.csv", usecols=['movieId', 'title'])
     movies = movies.set_index('movieId')
-    #print(movies.head())
-    return(movies)
+    return movies
 
 
 def loadRatings():
     ratings = pd.read_csv("Data/ratings.csv", usecols=['userId', 'movieId', 'rating'])
-    #print(ratings.head())
-    return(ratings)
+    ratings.columns = ["userID", "itemID", "rating"]
+    return ratings
+
+def getRatingMatrix(ratings, ind='userID', col='itemID', val='rating'):
+    mtx = ratings.pivot(index=ind, columns=col, values=val)
+    return mtx
+    
+
+def getFilteredRatingMatrix(ratings, min_items, min_users, ind='userID', col='itemID', val='rating'):
+    # obtengo items con count mayor al min items
+    items_count = ratings[col].value_counts().sort_index()
+    filtered_items = items_count[items_count > min_items].index
+    # filtro del ratings los items y sobre eso obtengo los users con count mayor al min users
+    users_count = ratings[ratings[col].isin(filtered_items)][ind].value_counts().sort_index()
+    filtered_users = users_count[users_count > min_users].index
+    # filtro en ratings los items y usuarios
+    ratings = ratings[(ratings[col].isin(filtered_items)) & (ratings[ind].isin(filtered_users))]
+    # creo matriz y la devuelvo    
+    return getRatingMatrix(ratings, ind, col, val)
 
 
-def getRatingMatrix(ratings):
-    mtx = ratings.pivot(index='userId', columns='movieId', values='rating')
-    means = mtx.mean(axis=1)
-    mtx = mtx.sub(means, axis = 0) # normalizacion
-    mtx = mtx.fillna(0)
-    #print(mtx.head())
-    return(mtx, means)
+def splitRatings(rating_mtx, test_size):
+    # inicializo train con los ratings y test con nan
+    train_ratings = rating_mtx.values.copy() 
+    test_ratings = np.nan * np.ones(rating_mtx.shape)
+    # seleccion random de los indices a utilizar en test
+    i,j = np.nonzero(rating_mtx.notna().astype(int).values)
+    selected = np.random.choice(len(i), int(np.floor(test_size*len(i))), replace=False)
+    # para los indices seleccionados, se incluye en test y se oculta en train
+    for s in selected:
+        test_ratings[i[s],j[s]] = train_ratings[i[s],j[s]].copy()
+        train_ratings[i[s],j[s]] = np.nan
+    # test y train son disjuntos
+    assert(np.all(np.isnan(train_ratings * test_ratings)))
+    # devuelvo df en lugar de array
+    return(pd.DataFrame(train_ratings, columns=rating_mtx.columns, index=rating_mtx.index),\
+        pd.DataFrame(test_ratings, columns=rating_mtx.columns, index=rating_mtx.index))
 
 
-def getSimilarityMatrix(mtx):
-    sim_mtx = pd.DataFrame(squareform(1 - pdist(mtx, 'cosine')), columns=mtx.index, index=mtx.index)
-    print(sim_mtx.head())
-    return(sim_mtx)
+def normalizeRatings(rating_mtx):
+    # calculo para cada user la media, 
+    means = rating_mtx.mean(axis=1)
+    # al rating de cada usuario, le resto su media
+    normalized = rating_mtx.sub(means, axis=0) 
+    # sobre los nuevos ratings, calculo para cada usuario, el rating minimo, el maximo y max-min
+    norm_df = pd.DataFrame({'mean': means,
+                            'min_r': normalized.min(axis=1), 
+                            'max_r': normalized.max(axis=1)})
+    norm_df['max-min'] = norm_df.apply(lambda row: row['max_r']-row['min_r'], axis=1)
+    # normalizacion min max
+    normalized = normalized.sub(norm_df['min_r'], axis=0).div(norm_df['max-min'], axis=0) 
+    # devuelvo df normalizado y df con valores utilizados para la normalizacion
+    return normalized, norm_df
 
 
-# set of k users similary to user_x that ranked item i
-def getSimilarUsers(mtx, sim_mtx, k, user_x, i):
-    ranked_i = mtx.loc[mtx[i].apply(lambda x: x!=0)].index.tolist()
-    if len(ranked_i) > 0:
-        top_k = sim_mtx.loc[ranked_i][user_x].sort_values(ascending=False).iloc[:k].index.tolist()
-    else:
-        top_k = []
-    return(top_k)
-
-
-def predictItemRating(mtx, sim_mtx, k, user_x, i):
-    neighborhood = getSimilarUsers(mtx, sim_mtx, k, user_x, i)
-    sum_similarity = sim_mtx.loc[neighborhood][user_x].sum()
-    if len(neighborhood) > 0 and sum_similarity != 0:
-        rating = (sim_mtx.loc[neighborhood][user_x]*mtx.loc[neighborhood][i]).values.sum()
-        rating = rating/sum_similarity
-    else:
-        rating = mtx.loc[mtx[i]!=0][i].mean() # average rating for item i
-    return(rating)
-
-
-def predictTopRating(mtx, sim_mtx, k, n, user_x):
-    lst = []
-    for item in mtx.loc[user_x].loc[mtx.loc[user_x]==0].index.tolist(): #items no rankeados
-        lst.append([item, predictItemRating(mtx, sim_mtx, k, user_x, item)])
-    predictions = pd.DataFrame(lst, columns=['movieId', 'rating'])
-    predictions = predictions.sort_values(by='rating', ascending=False).iloc[:n].set_index('movieId')
-    movies = loadMovies()
-    predictions['title'] = movies.loc[predictions.index.tolist()]['title'] 
-    print(predictions)
-    return(predictions)
-
-
-
-k = 6
-user_x = 1
-item_i = 10
-n = 10
-
-rating_mtx, means = getRatingMatrix(loadRatings())
-similarity_mtx = getSimilarityMatrix(rating_mtx)
-
-predictions = predictTopRating(rating_mtx, similarity_mtx, k, n, user_x)
-
+def meltRatingMatrix(rating_mtx, ind='userID', col='itemID', val='rating'):
+    melted = pd.melt(rating_mtx.reset_index(),
+                     id_vars=[ind], value_vars=rating_mtx.columns.values,
+                     value_name=val).dropna()
+    return melted
